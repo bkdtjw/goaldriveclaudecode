@@ -1,4 +1,4 @@
-"""节点模块"""
+"""节点包 - 目标驱动层节点"""
 
 from goaldriveclaude.nodes.error_recovery import error_recovery
 from goaldriveclaude.nodes.evaluator import evaluator

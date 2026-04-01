@@ -4,7 +4,42 @@ import subprocess
 import time
 from pathlib import Path
 
-from goaldriveclaude.core.models import CommandBlacklist
+# 危险命令黑名单
+BLACKLISTED_COMMANDS = [
+    "rm -rf /",
+    "rm -rf ~",
+    "rm -rf *",
+    "format",
+    "mkfs",
+    "dd if=/dev/zero",
+    ":(){:|:&};:",  # fork bomb
+]
+
+BLACKLISTED_PATTERNS = [
+    "> /dev/sda",
+    "curl *| *sh",
+    "wget *| *sh",
+]
+
+
+def _is_command_blocked(command: str) -> tuple[bool, str]:
+    """检查命令是否在黑名单中"""
+    cmd_lower = command.lower()
+
+    for blocked in BLACKLISTED_COMMANDS:
+        if blocked in cmd_lower:
+            return True, f"包含危险命令: {blocked}"
+
+    # 简单模式匹配
+    import re
+    for pattern in BLACKLISTED_PATTERNS:
+        try:
+            if re.search(pattern, command, re.IGNORECASE):
+                return True, f"匹配危险模式: {pattern}"
+        except re.error:
+            continue
+
+    return False, ""
 
 
 def run_bash(command: str, timeout: int = 30, working_dir: str = ".") -> dict:
@@ -27,7 +62,7 @@ def run_bash(command: str, timeout: int = 30, working_dir: str = ".") -> dict:
     }
 
     # 安全检查 - 检查黑名单
-    is_blocked, reason = CommandBlacklist.is_blocked(command)
+    is_blocked, reason = _is_command_blocked(command)
     if is_blocked:
         result["error"] = f"命令被阻止: {reason}"
         result["duration_ms"] = int((time.time() - start_time) * 1000)

@@ -5,8 +5,6 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from goaldriveclaude.core.models import ToolResultModel
-
 
 def read_file(path: str, limit: int = 100, offset: int = 0) -> dict:
     """读取文件内容
