@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from goaldriveclaude.config import get_config
-from goaldriveclaude.core.state import AgentState
+from goaldriveclaude.core.state import GoalState
 
 
 def _serialize_messages(messages: list[Any]) -> list[dict]:
@@ -79,7 +79,7 @@ class SessionManager:
         self._save_session(session_id, session_data)
         return session_id
 
-    def save_state(self, session_id: str, state: AgentState) -> None:
+    def save_state(self, session_id: str, state: GoalState) -> None:
         """保存状态
 
         Args:

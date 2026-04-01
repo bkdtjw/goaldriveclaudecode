@@ -1,19 +1,11 @@
-"""节点包 - 目标驱动层节点"""
+"""节点包 - 多 Agent 投票架构"""
 
-from goaldriveclaude.nodes.error_recovery import error_recovery
-from goaldriveclaude.nodes.evaluator import evaluator
-from goaldriveclaude.nodes.executor import executor
-from goaldriveclaude.nodes.goal_analyzer import goal_analyzer
-from goaldriveclaude.nodes.human_input import human_input
-from goaldriveclaude.nodes.planner import planner
-from goaldriveclaude.nodes.verifier import verifier
+from goaldriveclaude.nodes.coordinator import coordinator
+from goaldriveclaude.nodes.global_verifier import global_verifier
+from goaldriveclaude.nodes.supervisor import supervisor
 
 __all__ = [
-    "goal_analyzer",
-    "planner",
-    "executor",
-    "evaluator",
-    "verifier",
-    "error_recovery",
-    "human_input",
+    "coordinator",
+    "supervisor",
+    "global_verifier",
 ]

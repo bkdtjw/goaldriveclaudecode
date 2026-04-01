@@ -10,8 +10,6 @@ from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 
-from goaldriveclaude.core.state import AgentState
-
 
 class Display:
     """终端显示类"""
@@ -31,33 +29,77 @@ class Display:
         )
         self.console.print()
 
-    def show_subgoal_progress(self, subgoals: list[dict]) -> None:
-        """显示子目标进度"""
-        if not subgoals:
+    def show_task_progress(self, task_cards: list[dict]) -> None:
+        """显示任务卡进度"""
+        if not task_cards:
             return
 
         table = Table(show_header=False, box=None)
         table.add_column("Status", style="bold")
-        table.add_column("Description")
+        table.add_column("Task")
 
         status_icons = {
+            "passed": "[green]✅[/green]",
             "done": "[green]✅[/green]",
             "in_progress": "[yellow]🔄[/yellow]",
+            "working": "[yellow]🔄[/yellow]",
+            "reviewing": "[cyan]⏳[/cyan]",
+            "rejected": "[red]❌[/red]",
             "failed": "[red]❌[/red]",
-            "verifying": "[cyan]⏳[/cyan]",
             "pending": "[dim]⬚[/dim]",
         }
 
-        for sg in subgoals:
-            status = sg.get("status", "pending")
+        for tc in task_cards:
+            status = tc.get("status", "pending")
             icon = status_icons.get(status, "⬚")
-            desc = sg.get("description", "")
-            if status == "in_progress":
+            desc = tc.get("description", "")
+            if status in ("in_progress", "working"):
                 desc = f"[bold]{desc}[/bold]"
             table.add_row(icon, desc)
 
-        self.console.print(Panel(table, title="[bold]子目标进度[/bold]", border_style="cyan"))
+        self.console.print(Panel(table, title="[bold]任务进度[/bold]", border_style="cyan"))
         self.console.print()
+
+    def show_coordinator_output(self, task_cards: list[dict]) -> None:
+        """显示 Coordinator 的任务拆分结果"""
+        self.console.print(Panel(f"[bold]Coordinator 已拆分 {len(task_cards)} 个任务[/bold]", border_style="blue"))
+
+    def show_worker_progress(self, task_id: str, message: str = "") -> None:
+        """显示 Worker 执行进度"""
+        if message:
+            self.console.print(f"[dim]Worker [{task_id}]: {message}[/dim]")
+        else:
+            self.console.print(f"[dim]Worker [{task_id}] 正在执行...[/dim]")
+
+    def show_voting_results(self, task_id: str, votes: dict[str, str]) -> None:
+        """显示 Supervisor 投票结果"""
+        table = Table(title=f"任务 {task_id} 投票结果")
+        table.add_column("Reviewer", style="cyan")
+        table.add_column("Vote", style="bold")
+
+        for reviewer, vote in votes.items():
+            color = "green" if vote == "pass" else "red"
+            table.add_row(reviewer, f"[{color}]{vote.upper()}[/{color}]")
+
+        self.console.print(table)
+
+    def show_global_verification(self, votes: dict[str, str]) -> None:
+        """显示全局验证结果"""
+        table = Table(title="全局集成验证")
+        table.add_column("Reviewer", style="cyan")
+        table.add_column("Vote", style="bold")
+
+        for reviewer, vote in votes.items():
+            color = "green" if vote == "pass" else "red"
+            table.add_row(reviewer, f"[{color}]{vote.upper()}[/{color}]")
+
+        self.console.print(table)
+
+    def show_retry_notice(self, task_id: str, feedback: list[str]) -> None:
+        """显示打回重做提示"""
+        self.console.print(f"\n[yellow]任务 {task_id} 被打回重做[/yellow]")
+        for fb in feedback:
+            self.console.print(f"  • {fb[:200]}")
 
     def show_iteration_header(self, n: int) -> None:
         """显示迭代轮次"""
@@ -102,21 +144,22 @@ class Display:
         """询问用户"""
         return Prompt.ask(f"[bold cyan]{question}[/bold cyan]")
 
-    def show_final_summary(self, state: AgentState) -> None:
+    def show_final_summary(self, state: dict) -> None:
         """显示最终摘要"""
         self.console.print()
 
-        if state["goal_verified"]:
+        phase = state.get("phase", "")
+        if phase == "done":
             self.console.print(
                 Panel(
                     "[bold green]🎉 目标已达成！[/bold green]",
                     border_style="green",
                 )
             )
-        elif state["should_abort"]:
+        elif state.get("should_abort"):
             self.console.print(
                 Panel(
-                    f"[bold red]⛔ 任务中止: {state['abort_reason']}[/bold red]",
+                    f"[bold red]⛔ 任务中止: {state.get('abort_reason', '未知原因')}[/bold red]",
                     border_style="red",
                 )
             )
@@ -128,7 +171,7 @@ class Display:
                 )
             )
 
-        self.console.print(f"[dim]总迭代次数: {state['iteration']}[/dim]")
+        self.console.print(f"[dim]总迭代次数: {state.get('iteration', 0)}[/dim]")
         self.console.print()
 
     def show_history(self, sessions: list[dict]) -> None:

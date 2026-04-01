@@ -22,9 +22,9 @@ def print_welcome():
     console.print()
     console.print(
         Panel(
-            "[bold blue]GoalDriveClaude[/bold blue] - [dim]Goal-driven AI Programming Assistant[/dim]\n"
+            "[bold blue]GoalDriveClaude[/bold blue] - [dim]Multi-Agent Voting AI Programmer[/dim]\n"
             "\n"
-            "[dim]Enter your goal, and I'll decompose, execute, and verify until completion.[/dim]\n"
+            "[dim]Coordinator splits tasks -> Workers execute -> Supervisors vote -> Global verify[/dim]\n"
             "[dim]Commands: /help, /exit, /history, /resume <id>[/dim]",
             title="Welcome",
             border_style="blue",
@@ -49,7 +49,7 @@ def print_help():
             "\n"
             "[dim]Example goals:[/dim]\n"
             "  [dim]Create a Flask blog application[/dim]\n"
-            "  [dim]Write a Python script to process CSV files[/dim]",
+            "  [dim]Refactor auth middleware with higher quality[/dim]",
             title="Help",
             border_style="cyan",
         )
@@ -61,7 +61,6 @@ def run_repl_loop(session_manager: SessionManager, display: Display):
     """REPL main loop"""
     print_welcome()
 
-    # Check API key
     config = get_config()
     if not config.anthropic_api_key:
         console.print("[bold red]Error: ANTHROPIC_API_KEY not set[/bold red]")
@@ -74,7 +73,6 @@ def run_repl_loop(session_manager: SessionManager, display: Display):
 
     while True:
         try:
-            # Show prompt
             if current_goal:
                 prompt_text = f"[dim](current: {current_goal[:30]}...)[/dim]\n> "
             else:
@@ -85,25 +83,6 @@ def run_repl_loop(session_manager: SessionManager, display: Display):
             if not user_input:
                 continue
 
-            # 如果当前 session 正在等待用户输入，把输入作为回复继续
-            if current_session_id and not user_input.startswith("/"):
-                saved_state = session_manager.load_state(current_session_id)
-                if saved_state and saved_state.get("phase") == "waiting_for_user":
-                    # 修复 JSON 反序列化后的 messages 格式（list -> tuple）
-                    messages = saved_state.get("messages", [])
-                    fixed_messages = []
-                    for m in messages:
-                        if isinstance(m, list) and len(m) >= 2:
-                            fixed_messages.append(tuple(m))
-                        else:
-                            fixed_messages.append(m)
-                    saved_state["messages"] = fixed_messages
-                    saved_state["messages"].append(("human", user_input))
-                    saved_state["phase"] = "planning"
-                    _run_agent_interactive(saved_state, display, session_manager, current_session_id)
-                    continue
-
-            # Handle commands
             if user_input.startswith("/"):
                 cmd = user_input.lower()
 
@@ -143,11 +122,9 @@ def run_repl_loop(session_manager: SessionManager, display: Display):
                     console.print("[dim]Type /help for available commands[/dim]")
 
             else:
-                # Process goal
                 current_goal = user_input
                 current_session_id = session_manager.create_session(current_goal)
 
-                # Create initial state
                 initial_state = create_initial_state(current_goal, max_iterations=50)
                 initial_state["session_id"] = current_session_id
 
@@ -171,11 +148,7 @@ def _run_agent_interactive(
     session_manager: SessionManager,
     session_id: str,
 ) -> dict[str, Any]:
-    """Run agent interactively
-
-    Returns:
-        Final state
-    """
+    """Run agent interactively"""
     config = get_config()
     interrupted = False
     last_state = state
@@ -197,38 +170,43 @@ def _run_agent_interactive(
                 if interrupted:
                     break
 
-                # Show iteration info
                 current_iteration = event.get("iteration", 0)
                 if current_iteration > 0:
                     display.show_iteration_header(current_iteration)
 
-                # Show subgoal progress
-                if event.get("subgoals"):
-                    display.show_subgoal_progress(event["subgoals"])
+                phase = event.get("phase", "")
+                task_cards = event.get("task_cards", [])
 
-                # Show recent tool calls
+                if phase == "coordinating" and task_cards:
+                    display.show_coordinator_output(task_cards)
+
+                if task_cards:
+                    display.show_task_progress(task_cards)
+
+                # Show recent tool calls from Worker or Reviewer
                 if event.get("tool_results"):
                     last_result = event["tool_results"][-1]
                     tool_name = last_result.get("tool", "")
-                    if tool_name and tool_name not in ("planner", "evaluator"):
+                    if tool_name:
                         display.show_tool_call(tool_name, last_result)
 
-                # Show verification report
-                if event.get("goal_verified") and event.get("verification_report"):
+                # Voting results
+                current_idx = event.get("current_task_index", 0)
+                if phase == "working" and task_cards and 0 <= current_idx < len(task_cards):
+                    tc = task_cards[current_idx]
+                    if tc.get("review_votes") and tc.get("status") in ("passed", "rejected"):
+                        display.show_voting_results(tc["id"], tc["review_votes"])
+
+                # Global verification
+                if phase == "global_reviewing" and event.get("verification_report"):
                     display.show_verification_report(event["verification_report"])
 
-                # Save state
                 session_manager.save_state(session_id, event)
 
-                # Check if should stop
                 if event.get("should_abort") or event.get("phase") in ("done", "aborted"):
                     break
 
-        # Show final summary (or waiting hint)
-        if last_state.get("phase") == "waiting_for_user":
-            console.print("\n[dim]⏸  已暂停，等待用户输入后继续...[/dim]")
-        else:
-            display.show_final_summary(last_state)
+        display.show_final_summary(last_state)
 
         if interrupted:
             console.print(f"\n[yellow]Session saved: {session_id}[/yellow]")
@@ -253,13 +231,7 @@ def _run_agent_interactive(
 @click.option("--verbose", "-v", is_flag=True, help="Verbose logging")
 @click.pass_context
 def main(ctx, goal, resume, max_iterations, verbose):
-    """GoalDriveClaude - Goal-driven AI Programming Agent
-
-    Usage:
-      goaldriveclaude                    # Start interactive mode
-      goaldriveclaude "Create Flask app" # Execute goal directly
-      goaldriveclaude --resume abc123    # Resume session
-    """
+    """GoalDriveClaude - Multi-Agent Voting Programming Agent"""
     reload_config()
     config = get_config()
 
@@ -269,7 +241,6 @@ def main(ctx, goal, resume, max_iterations, verbose):
     display = Display()
     session_manager = SessionManager()
 
-    # Resume session
     if resume:
         state_dict = session_manager.load_state(resume)
         if state_dict:
@@ -279,7 +250,6 @@ def main(ctx, goal, resume, max_iterations, verbose):
             console.print(f"[red]Session not found: {resume}[/red]")
         return
 
-    # Execute goal directly
     if goal:
         session_id = session_manager.create_session(goal)
         initial_state = create_initial_state(goal, max_iterations)
@@ -289,7 +259,6 @@ def main(ctx, goal, resume, max_iterations, verbose):
         _run_agent_interactive(initial_state, display, session_manager, session_id)
         return
 
-    # No arguments: enter REPL interactive mode
     run_repl_loop(session_manager, display)
 
 

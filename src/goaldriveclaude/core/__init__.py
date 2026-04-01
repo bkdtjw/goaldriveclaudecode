@@ -2,16 +2,14 @@
 
 from goaldriveclaude.core.graph import build_graph
 from goaldriveclaude.core.state import (
-    AgentState,
-    PendingAction,
-    SubGoal,
+    GoalState,
+    TaskCard,
     create_initial_state,
 )
 
 __all__ = [
-    "AgentState",
-    "SubGoal",
-    "PendingAction",
+    "GoalState",
+    "TaskCard",
     "create_initial_state",
     "build_graph",
 ]

@@ -1,189 +1,150 @@
-"""LangGraph 图定义 - 目标驱动状态图
+"""LangGraph 图定义 - GoalDriveClaude 多 Agent 投票架构
 
 架构:
-    START -> goal_analyzer
-         -> planner -> executor -> evaluator (循环直到子目标完成)
-         -> verifier (所有子目标完成后)
-         -> END
-
-状态路由:
-    - phase 字段控制流程: analyzing -> planning -> executing -> evaluating -> verifying -> done
-    - route_after_evaluation 是核心路由函数
+    START -> coordinator
+         -> worker -> supervisor -> (通过/打回/全局验证/结束)
 """
 
 from langgraph.graph import END, START, StateGraph
 
-from goaldriveclaude.core.state import AgentState
-from goaldriveclaude.nodes import (
-    error_recovery,
-    evaluator,
-    executor,
-    goal_analyzer,
-    human_input,
-    planner,
-    verifier,
-)
+from goaldriveclaude.agents.worker import invoke_worker
+from goaldriveclaude.core.state import GoalState
+from goaldriveclaude.nodes.coordinator import coordinator
+from goaldriveclaude.nodes.global_verifier import global_verifier
+from goaldriveclaude.nodes.supervisor import supervisor
 from goaldriveclaude.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-def route_after_evaluation(state: AgentState) -> str:
-    """评估后的路由决策
+def _set_task_in_progress(state: GoalState) -> dict:
+    """在 Worker 执行前，把当前任务标记为 in_progress。"""
+    idx = state["current_task_index"]
+    task_cards = list(state["task_cards"])
+    if idx < len(task_cards):
+        task_cards[idx] = {**task_cards[idx], "status": "in_progress"}
+    return {"task_cards": task_cards}
 
-    这是核心的路由函数，决定执行流程走向。
-    """
-    # abort 条件 - 最高优先级
+
+def next_task(state: GoalState) -> dict:
+    """推进到下一个待执行的任务。"""
+    current_idx = state["current_task_index"]
+    task_cards = state["task_cards"]
+
+    for i in range(current_idx + 1, len(task_cards)):
+        if task_cards[i]["status"] in ("pending", "in_progress"):
+            logger.info(f"推进到下一个任务: {task_cards[i]['id']}")
+            return {"current_task_index": i, "phase": "working"}
+
+    # 如果没有下一个，但可能全部通过了（理论上 supervisor 会直接送全局验证）
+    if all(t["status"] == "passed" for t in task_cards):
+        return {"phase": "global_reviewing"}
+
+    logger.warning("没有找到下一个任务，但也不是全部通过")
+    return {"phase": "working"}
+
+
+def route_after_coordinator(state: GoalState) -> str:
+    if state.get("should_abort"):
+        logger.warning(f"任务中止: {state.get('abort_reason', '未知原因')}")
+        return "end"
+    return "worker"
+
+
+def route_after_worker(state: GoalState) -> str:
+    return "supervisor"
+
+
+def route_after_supervisor(state: GoalState) -> str:
     if state.get("should_abort"):
         logger.warning(f"任务中止: {state.get('abort_reason', '未知原因')}")
         return "end"
 
-    # 安全阀：超过最大迭代次数
-    if state["iteration"] >= state["max_iterations"]:
-        logger.warning("超过最大迭代次数")
-        return "end"
+    current_idx = state["current_task_index"]
+    if current_idx >= len(state["task_cards"]):
+        return "global_verifier"
 
-    # 错误恢复
-    if state["consecutive_failures"] >= 3:
-        logger.warning(f"连续失败 {state['consecutive_failures']} 次，进入错误恢复")
-        return "error_recovery"
+    current = state["task_cards"][current_idx]
 
-    # 人工介入
-    if state.get("needs_human_input"):
-        return "human_input"
+    if current["status"] == "rejected":
+        if current.get("retry_count", 0) >= 3:
+            return "end"
+        logger.info(f"任务 {current['id']} 被打回，返回 Worker 重做")
+        return "worker"
 
-    # 根据 phase 路由（evaluator 已设置 phase）
-    phase = state.get("phase", "planning")
+    if current["status"] == "passed":
+        if all(t["status"] == "passed" for t in state["task_cards"]):
+            return "global_verifier"
+        return "next_task"
 
-    if phase == "verifying":
-        # 所有子目标完成，进入验证
-        return "verifier"
-
-    if phase == "done":
-        # 任务完成
-        return "end"
-
-    if phase == "aborted":
-        # 任务中止
-        return "end"
-
-    if phase == "waiting_for_user":
-        # 等待用户输入，退出 graph
-        return "end"
-
-    # 默认回到 planner 继续执行
-    return "planner"
+    return "end"
 
 
-def route_after_verifier(state: AgentState) -> str:
-    """验证后的路由"""
+def route_after_next_task(state: GoalState) -> str:
     if state.get("should_abort"):
         return "end"
-
-    if state.get("needs_human_input"):
-        return "human_input"
-
-    # 验证通过
-    if state.get("goal_verified"):
-        return "end"
-
-    # 验证失败，回到 planner 重新规划
-    return "planner"
+    return "worker"
 
 
-def route_after_error_recovery(state: AgentState) -> str:
-    """错误恢复后的路由"""
+def route_after_global_verifier(state: GoalState) -> str:
     if state.get("should_abort"):
         return "end"
-
-    if state.get("needs_human_input"):
-        return "human_input"
-
-    # 回到 planner 继续
-    return "planner"
-
-
-def route_after_human_input(state: AgentState) -> str:
-    """人工介入后的路由"""
-    if state.get("should_abort"):
+    if state.get("phase") == "done":
         return "end"
-
-    # 回到 planner
-    return "planner"
+    return "worker"
 
 
 def build_graph():
-    """构建目标驱动的状态图
+    """构建多 Agent 投票驱动的状态图。"""
+    workflow = StateGraph(GoalState)
 
-    Returns:
-        编译后的状态图 (CompiledStateGraph)
-    """
-    workflow = StateGraph(AgentState)
+    # 添加节点
+    workflow.add_node("coordinator", coordinator)
+    workflow.add_node("prepare_worker", _set_task_in_progress)
+    workflow.add_node("worker", invoke_worker)
+    workflow.add_node("supervisor", supervisor)
+    workflow.add_node("next_task", next_task)
+    workflow.add_node("global_verifier", global_verifier)
 
-    # 添加所有节点
-    workflow.add_node("goal_analyzer", goal_analyzer)
-    workflow.add_node("planner", planner)
-    workflow.add_node("executor", executor)
-    workflow.add_node("evaluator", evaluator)
-    workflow.add_node("verifier", verifier)
-    workflow.add_node("error_recovery", error_recovery)
-    workflow.add_node("human_input", human_input)
+    # 入口
+    workflow.set_entry_point("coordinator")
 
-    # 入口点
-    workflow.set_entry_point("goal_analyzer")
-
-    # 添加边
-    workflow.add_edge("goal_analyzer", "planner")
-
-    # planner -> executor -> evaluator 形成执行循环
-    workflow.add_edge("planner", "executor")
-    workflow.add_edge("executor", "evaluator")
-
-    # evaluator 后的条件路由 - 核心路由
+    # coordinator -> conditional -> worker / end
     workflow.add_conditional_edges(
-        "evaluator",
-        route_after_evaluation,
+        "coordinator",
+        route_after_coordinator,
+        {"worker": "prepare_worker", "end": END},
+    )
+
+    # prepare_worker -> worker -> supervisor
+    workflow.add_edge("prepare_worker", "worker")
+    workflow.add_edge("worker", "supervisor")
+
+    # supervisor -> conditional
+    workflow.add_conditional_edges(
+        "supervisor",
+        route_after_supervisor,
         {
-            "planner": "planner",
-            "verifier": "verifier",
-            "error_recovery": "error_recovery",
-            "human_input": "human_input",
+            "worker": "prepare_worker",
+            "next_task": "next_task",
+            "global_verifier": "global_verifier",
             "end": END,
         },
     )
 
-    # verifier 后的条件路由
+    # next_task -> conditional -> worker / end
     workflow.add_conditional_edges(
-        "verifier",
-        route_after_verifier,
-        {
-            "planner": "planner",
-            "human_input": "human_input",
-            "end": END,
-        },
+        "next_task",
+        route_after_next_task,
+        {"worker": "prepare_worker", "end": END},
     )
 
-    # error_recovery 后的路由
+    # global_verifier -> conditional -> worker / end
     workflow.add_conditional_edges(
-        "error_recovery",
-        route_after_error_recovery,
-        {
-            "planner": "planner",
-            "human_input": "human_input",
-            "end": END,
-        },
+        "global_verifier",
+        route_after_global_verifier,
+        {"worker": "prepare_worker", "end": END},
     )
 
-    # human_input 后的路由
-    workflow.add_conditional_edges(
-        "human_input",
-        route_after_human_input,
-        {
-            "planner": "planner",
-            "end": END,
-        },
-    )
-
-    # 编译并返回编译后的图
     compiled = workflow.compile()
     return compiled
